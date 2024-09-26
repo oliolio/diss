@@ -1,6 +1,8 @@
 import openmc
 import openmc.deplete
 
+#2.35% , IFBA version (no pyrex)
+
 # Define materials
 f_235 = openmc.Material(name='Fuel 2.35%')
 f_235.add_element('U', 1.0, enrichment=2.35)
