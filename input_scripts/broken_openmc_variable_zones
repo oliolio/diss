@@ -1,0 +1,533 @@
+import os
+import openmc
+import numpy as np
+import openmc.deplete
+from collections import namedtuple
+
+# Define constants
+ROOT_DIR = "/home/hpcatta/openmc-0.13.3/please/sick/"
+DEPLETION_FILE = "/home/hpcatta/openmc-0.13.3/please/chain_endfb80_pwr.xml"
+CROSS_SECTION_FILE = '/home/hpcatta/openmc/endfb-viii.0-hdf5/cross_sections.xml'
+
+ENRICHMENT_VALUES = "enrichments.txt"
+RADIUS_VALUES = "fuel_radius.txt"
+
+time_step_nr = 5
+
+# Define enrichment and other parameters
+enrichment1 = 19          # Enrichment for Fuel Region 1 (percent, between 1 and 19.75)
+enrichment2 = 5           # Enrichment for Fuel Region 2 (percent, between 1 and 19.75)
+enrichment3 = 5           # Enrichment for Fuel Region 3 (percent, between 1 and 19.75)
+enrichment4 = 5           # Enrichment for Fuel Region 4 (percent, between 1 and 19.75)
+t_urbo = 0.1              # Thickness of urbo layer (cm, between 0.1 and 0.14)
+atom_fraction_U = 0.95    # Atom fraction of U (between 0.9 and 0.999)
+urbo_region_number = 2    # Fuel region number where urbo is inserted (1, 2, 3, or 4)
+
+# Define initial radii (before adjusting for urbo)
+FUEL_AND_urbo_OUTER_RADIUS = 0.415  # Total outer radius including urbo (cm)
+FR1 = 0.20475  # Initial radius for Fuel Region 1 (cm)
+FR2 = 0.28956  # Initial radius for Fuel Region 2 (cm)
+FR3 = 0.35464  # Initial radius for Fuel Region 3 (cm)
+FR4 = 0.4095   # Initial radius for Fuel Region 4 (cm)
+
+def get_cross_sections():
+    """Set the OpenMC cross section path."""
+    os.environ['OPENMC_CROSS_SECTIONS'] = os.path.abspath(CROSS_SECTION_FILE)
+    openmc.config['cross_sections'] = CROSS_SECTION_FILE
+
+get_cross_sections()
+
+def save_radius_values(fr1, fr2, fr3, fr4, thickness_urbo):
+    """Save the adjusted fuel radii and urbo thickness to a file."""
+    gen_pop = ['standalone', 'run']
+    with open(os.path.join(ROOT_DIR, RADIUS_VALUES), 'a') as file:
+        line = f"{gen_pop[0]} {gen_pop[1]} {fr1:.5f} {fr2:.5f} {fr3:.5f} {fr4:.5f} {FUEL_AND_urbo_OUTER_RADIUS} {thickness_urbo} {atom_fraction_U}\n"
+        file.write(line)
+
+def get_fuel_radius_values(urbo_thickness: float):
+    """Calculate adjusted fuel radii based on urbo thickness."""
+    fr4_new = FUEL_AND_urbo_OUTER_RADIUS - urbo_thickness
+    alpha = fr4_new / FR4
+    fr1 = FR1 * alpha
+    fr2 = fr1 + (FR2 - FR1) * alpha
+    fr3 = fr2 + (FR3 - FR2) * alpha
+    fr4 = fr4_new
+    return fr1, fr2, fr3, fr4
+
+# Define a namedtuple for clarity
+UniverseComponents = namedtuple('UniverseComponents', [
+    'radii',
+    'gt_outer_radius',
+    'fuel_bottom',
+    'fuel_top',
+    'f_1',
+    'f_2',
+    'f_3',
+    'f_4',
+    'f_cutback',
+    'UB2_diluted',
+    'zirconium',
+    'water',
+    'gt_water_region',
+    'gt_clad_region',
+    'cells',
+    'gap',
+    'clad',
+    'moderator'
+])
+
+def define_universe_components(enrichment1, enrichment2, enrichment3, enrichment4, no_of_pins, thickness_urbo=FUEL_AND_urbo_OUTER_RADIUS - FR4, urbo_region_number=2):
+    """Define universe components based on fuel regions and urbo insertion."""
+    # Calculate adjusted radii based on urbo thickness
+    fr1, fr2, fr3, fr4 = get_fuel_radius_values(thickness_urbo)
+    save_radius_values(fr1, fr2, fr3, fr4, thickness_urbo)
+    radii = [0, fr1, fr2, fr3, fr4]
+    height = 396  # Example height, adjust as needed
+    materials = openmc.Materials([])
+    
+    # Define Fuel Materials with Manual Isotopic Composition
+    def create_fuel_material(name, enrichment):
+        """Create a fuel material with manual isotopic composition."""
+        material = openmc.Material(name=name)
+        U235_fraction = enrichment / 100.0
+        U234_fraction = 0.008 * (1 - U235_fraction)  # Assuming U234/U235 mass ratio is 0.008
+        U238_fraction = 1.0 - U235_fraction - U234_fraction
+        material.add_nuclide('U234', U234_fraction, 'ao')
+        material.add_nuclide('U235', U235_fraction, 'ao')
+        material.add_nuclide('U238', U238_fraction, 'ao')
+        material.add_nuclide('O16', 2.0)
+        material.set_density('g/cc', 10.4)
+        material.depletable = True  # Mark as depletable
+        return material
+
+    # Create and append fuel materials
+    f_1 = create_fuel_material('Fuel 1', enrichment1)
+    materials.append(f_1)
+    
+    f_2 = create_fuel_material('Fuel 2', enrichment2)
+    materials.append(f_2)
+    
+    f_3 = create_fuel_material('Fuel 3', enrichment3)
+    materials.append(f_3)
+    
+    f_4 = create_fuel_material('Fuel 4', enrichment4)
+    materials.append(f_4)
+    
+    # Assign Volumes to Fuel Materials
+    fuel1_volume = np.pi * (radii[1]**2 - radii[0]**2) * height * no_of_pins
+    f_1.volume = fuel1_volume
+    
+    fuel2_volume = np.pi * (radii[2]**2 - radii[1]**2) * height * no_of_pins
+    f_2.volume = fuel2_volume
+    
+    fuel3_volume = np.pi * (radii[3]**2 - radii[2]**2) * height * no_of_pins
+    f_3.volume = fuel3_volume
+    
+    fuel4_volume = np.pi * (radii[4]**2 - radii[3]**2) * height * no_of_pins
+    f_4.volume = fuel4_volume
+    
+    # Define Fuel Cutback
+    # Assuming fuel_cutback has same enrichment as Fuel 1 minus some placeholder adjustment
+    r_cutback = enrichment1 - 0.5  # Placeholder for enrichment value, adjust as needed
+    f_cutback = create_fuel_material('Fuel Cutback', r_cutback)
+    # Compute volume based on outer fuel radius
+    fuel_outer_radius = radii[4]  # fr4
+    fuel_cutback_inner_radius = 0  # Assuming it starts from center; adjust if different
+    f_cutback_volume = np.pi * (fuel_outer_radius**2 - fuel_cutback_inner_radius**2) * height * no_of_pins
+    f_cutback.volume = f_cutback_volume
+    materials.append(f_cutback)
+    
+    # Define UB2_diluted Material
+    atom_fraction_UB2 = 1 - atom_fraction_U
+    UB2_diluted = openmc.Material(name='UB2_diluted')
+    UB2_diluted.add_nuclide('U235', (enrichment4 / 100.0) * atom_fraction_U + (enrichment4 / 100.0) * atom_fraction_UB2, 'ao')
+    UB2_diluted.add_nuclide('U238', (1 - (enrichment4 / 100.0)) * atom_fraction_UB2 + (1 - (enrichment4 / 100.0)) * atom_fraction_U, 'ao')
+    UB2_diluted.add_nuclide('B10', 0.16 * atom_fraction_UB2 * 2, 'ao')
+    UB2_diluted.add_nuclide('B11', 0.84 * atom_fraction_UB2 * 2, 'ao')
+    density_UB2 = 12.71
+    density_U = 19.1
+    density_UB2_diluted = (atom_fraction_UB2 * density_UB2) + (atom_fraction_U * density_U)
+    UB2_diluted.set_density('g/cm3', density_UB2_diluted)
+    UB2_diluted.depletable = True
+    # Define urbo_radius before setting volume
+    urbo_radius = FUEL_AND_urbo_OUTER_RADIUS
+    UB2_diluted_volume = np.pi * (urbo_radius**2 - fuel_outer_radius**2) * height * no_of_pins
+    UB2_diluted.volume = UB2_diluted_volume
+    materials.append(UB2_diluted)
+    
+    # Define Other Materials
+    zirconium = openmc.Material(name="zirconium")
+    zirconium.add_element('Zr', 1.0)
+    zirconium.set_density('g/cm3', 6.6)
+    materials.append(zirconium)
+    
+    helium = openmc.Material(name='Helium')
+    helium.add_element('He', 1.0)
+    helium.set_density('g/cm3', 0.178e-3)
+    materials.append(helium)
+    
+    water = openmc.Material(name='water')
+    water.add_nuclide('H1', 2.0)
+    water.add_nuclide('O16', 1.0)
+    water.set_density('g/cm3', 1.0)
+    water.add_s_alpha_beta('c_H_in_H2O')
+    materials.append(water)
+    
+    # Define Geometry Cylinders and Planes
+    clad_inner_radius = openmc.ZCylinder(r=0.4177)
+    clad_outer_radius = openmc.ZCylinder(r=0.4749)
+    gt_inner_radius = openmc.ZCylinder(r=0.5715)
+    gt_outer_radius = openmc.ZCylinder(r=0.612)
+    lower_cutback_height = openmc.ZPlane(z0=-426.0 / 2.0 + 15)
+    upper_cutback_height = openmc.ZPlane(z0=+426.0 / 2.0 - 15)
+    fuel_bottom = openmc.ZPlane(z0=-426.0 / 2.0, boundary_type='reflective')
+    fuel_top = openmc.ZPlane(z0=+426.0 / 2.0, boundary_type='reflective')
+    
+    # Define Fuel Regions
+    fuel1_region = (-openmc.ZCylinder(r=radii[1]) &
+                   +lower_cutback_height &
+                   -upper_cutback_height)
+    
+    fuel2_region = (+openmc.ZCylinder(r=radii[1]) &
+                   -openmc.ZCylinder(r=radii[2]) &
+                   +lower_cutback_height &
+                   -upper_cutback_height)
+    
+    fuel3_region = (+openmc.ZCylinder(r=radii[2]) &
+                   -openmc.ZCylinder(r=radii[3]) &
+                   +lower_cutback_height &
+                   -upper_cutback_height)
+    
+    fuel4_region = (+openmc.ZCylinder(r=radii[3]) &
+                   -openmc.ZCylinder(r=radii[4]) &
+                   +lower_cutback_height &
+                   -upper_cutback_height)
+    
+    # Define Cutback Region
+    cutback_region = ((-openmc.ZCylinder(r=radii[4]) &
+                       -lower_cutback_height &
+                       +fuel_bottom) |
+                      (-openmc.ZCylinder(r=radii[4]) &
+                       +upper_cutback_height &
+                       -fuel_top))
+    
+    # Define Urbo Region (to be inserted into a specified fuel region)
+    # Adjust this part based on urbo_region_number
+    if urbo_region_number == 1:
+        urbo_insert_region = fuel1_region
+        max_thickness = radii[1] - radii[0]
+    elif urbo_region_number == 2:
+        urbo_insert_region = fuel2_region
+        max_thickness = radii[2] - radii[1]
+    elif urbo_region_number == 3:
+        urbo_insert_region = fuel3_region
+        max_thickness = radii[3] - radii[2]
+    elif urbo_region_number == 4:
+        urbo_insert_region = fuel4_region
+        max_thickness = radii[4] - radii[3]
+    else:
+        raise ValueError("urbo_region_number must be 1, 2, 3, or 4.")
+    
+    # Adjust thickness if it exceeds the maximum allowable thickness
+    if thickness_urbo > max_thickness:
+        print(f"Requested t_urbo={thickness_urbo} cm exceeds the maximum allowable thickness in region {urbo_region_number}. Adjusting to {max_thickness} cm.")
+        thickness_urbo = max_thickness
+    
+    # Define urbo inner and outer radii
+    urbo_inner_radius = radii[urbo_region_number - 1]
+    urbo_outer_radius = urbo_inner_radius + thickness_urbo
+    urbo_radius_obj = openmc.ZCylinder(r=urbo_outer_radius)
+    
+    # Define Urbo Region
+    urbo_region = (+openmc.ZCylinder(r=urbo_inner_radius) &
+                   -urbo_radius_obj &
+                   +lower_cutback_height &
+                   -upper_cutback_height)
+    
+    # Adjust the specified fuel region to exclude the urbo layer
+    remaining_fuel_region = (+urbo_radius_obj &
+                             -openmc.ZCylinder(r=radii[urbo_region_number]) &
+                             +lower_cutback_height &
+                             -upper_cutback_height)
+    
+    # Update the fuel region based on urbo insertion
+    if urbo_region_number == 1:
+        fuel1_region = remaining_fuel_region
+    elif urbo_region_number == 2:
+        fuel2_region = remaining_fuel_region
+    elif urbo_region_number == 3:
+        fuel3_region = remaining_fuel_region
+    elif urbo_region_number == 4:
+        fuel4_region = remaining_fuel_region
+    
+    # Define Gap and Clad Regions
+    gap_region = (+openmc.ZCylinder(r=FUEL_AND_urbo_OUTER_RADIUS) &
+                  -clad_inner_radius &
+                  +fuel_bottom &
+                  -fuel_top)
+    
+    clad_region = (+clad_inner_radius &
+                   -clad_outer_radius &
+                   +fuel_bottom &
+                   -fuel_top)
+    
+    # Define Guide Tube Regions
+    gt_water_region = (-gt_inner_radius &
+                       +fuel_bottom &
+                       -fuel_top)
+    
+    gt_clad_region = (+gt_inner_radius &
+                      -gt_outer_radius &
+                      +fuel_bottom &
+                      -fuel_top)
+    
+    # Define Cells
+    fuel1 = openmc.Cell(name='fuel1')
+    fuel1.fill = f_1
+    fuel1.region = fuel1_region
+    
+    fuel2 = openmc.Cell(name='fuel2')
+    fuel2.fill = f_2
+    fuel2.region = fuel2_region
+    
+    fuel3 = openmc.Cell(name='fuel3')
+    fuel3.fill = f_3
+    fuel3.region = fuel3_region
+    
+    fuel4 = openmc.Cell(name='fuel4')
+    fuel4.fill = f_4
+    fuel4.region = fuel4_region
+    
+    cutback = openmc.Cell(name='Cutback')
+    cutback.fill = f_cutback
+    cutback.region = cutback_region
+    
+    urbo = openmc.Cell(name='urbo coating')
+    urbo.fill = UB2_diluted
+    urbo.region = urbo_region
+    
+    gap = openmc.Cell(name='air gap')
+    gap.fill = helium
+    gap.region = gap_region
+    
+    clad = openmc.Cell(name='clad')
+    clad.fill = zirconium
+    clad.region = clad_region
+    
+    moderator = openmc.Cell(name='Moderator')
+    moderator.fill = water
+    moderator.region = (+clad_outer_radius &
+                         -fuel_top &
+                         +fuel_bottom)
+    
+    # Collect all fuel-related cells
+    cells = [fuel1, fuel2, fuel3, fuel4, cutback, urbo, gap, clad, moderator]
+    
+    return UniverseComponents(
+        radii=radii,
+        gt_outer_radius=gt_outer_radius,
+        fuel_bottom=fuel_bottom,
+        fuel_top=fuel_top,
+        f_1=f_1,
+        f_2=f_2,
+        f_3=f_3,
+        f_4=f_4,
+        f_cutback=f_cutback,
+        UB2_diluted=UB2_diluted,
+        zirconium=zirconium,
+        water=water,
+        gt_water_region=gt_water_region,
+        gt_clad_region=gt_clad_region,
+        cells=cells,
+        gap=gap,
+        clad=clad,
+        moderator=moderator
+    )
+
+def run_calculation(enrichment1, enrichment2, enrichment3, enrichment4, thickness_urbo=None):
+    """Run the OpenMC calculation with specified parameters."""
+    if thickness_urbo is None:
+        thickness_urbo = FUEL_AND_urbo_OUTER_RADIUS - FR4
+    plot_pixels = 1200
+    mesh_nr = 9
+
+    # Define universe components for the outer universe (without urbo layer)
+    components_outer = define_universe_components(
+        enrichment1=enrichment1,
+        enrichment2=enrichment2,
+        enrichment3=enrichment3,
+        enrichment4=enrichment4,
+        no_of_pins=53.5,
+        thickness_urbo=1E-6,  # Very thin to simulate absence
+        urbo_region_number=4  # Default to region 4 (no urbo)
+    )
+
+    # Define universe components for the inner universe with specified urbo thickness
+    components_inner = define_universe_components(
+        enrichment1=enrichment1,
+        enrichment2=enrichment2,
+        enrichment3=enrichment3,
+        enrichment4=enrichment4,
+        no_of_pins=12.5,
+        thickness_urbo=thickness_urbo,
+        urbo_region_number=urbo_region_number
+    )
+
+    # Create Universes
+    pin_cell_universe_outer = openmc.Universe(name='Fuel Pin (Outer)', cells=components_outer.cells)
+    pin_cell_universe_inner = openmc.Universe(name='Fuel Pin (Inner)', cells=components_inner.cells)
+
+    # Define Guide Tube Universe
+    gt1 = openmc.Cell(name='Guide tube filled with water', fill=components_outer.water, region=components_outer.gt_water_region)
+    gt2 = openmc.Cell(name='Guide tube clad', fill=components_outer.zirconium, region=components_outer.gt_clad_region)
+    mode = openmc.Cell(name='Moderator', fill=components_outer.water,
+                       region=(+components_outer.gt_outer_radius &
+                               -components_outer.fuel_top &
+                               +components_outer.fuel_bottom))
+    gt = openmc.Universe(name='Guide Tube', cells=[gt1, gt2, mode])
+
+    # Define Lattice
+    pitch = 1.26
+    assembly = openmc.RectLattice(name='Fuel - 0BA')
+    assembly.pitch = (pitch, pitch)
+    assembly.lower_left = [-pitch * mesh_nr / 2, -pitch * mesh_nr / 2]
+
+    # Populate Universes in Lattice
+    assembly.universes = [
+        [pin_cell_universe_outer for _ in range(mesh_nr)],
+        [pin_cell_universe_outer for _ in range(mesh_nr)],
+        [pin_cell_universe_outer for _ in range(5)] + [gt] + [pin_cell_universe_inner for _ in range(2)] + [gt],
+        [pin_cell_universe_outer for _ in range(3)] + [gt] + [pin_cell_universe_inner for _ in range(5)],
+        [pin_cell_universe_outer for _ in range(mesh_nr)],
+        [pin_cell_universe_outer for _ in range(2)] + [gt] + [pin_cell_universe_inner for _ in range(2)] + [gt] + [pin_cell_universe_inner for _ in range(3)],
+        [pin_cell_universe_outer for _ in range(mesh_nr)],
+        [pin_cell_universe_outer for _ in range(mesh_nr)],
+        [pin_cell_universe_outer for _ in range(2)] + [gt] + [pin_cell_universe_inner for _ in range(2)] + [gt] + [pin_cell_universe_outer for _ in range(3)],
+    ]
+
+    # Define Root Universe and Geometry
+    root_cell = openmc.Cell(name='root cell', fill=assembly)
+    min_x = openmc.XPlane(x0=-pitch * mesh_nr / 2, boundary_type='reflective')
+    max_x = openmc.XPlane(x0=pitch * mesh_nr / 2, boundary_type='reflective')
+    min_y = openmc.YPlane(y0=-pitch * mesh_nr / 2, boundary_type='reflective')
+    max_y = openmc.YPlane(y0=pitch * mesh_nr / 2, boundary_type='reflective')
+
+    root_cell.region = (+min_x & -max_x & +min_y & -max_y &
+                        +components_outer.fuel_bottom & -components_outer.fuel_top)
+
+    root_universe = openmc.Universe(name='root universe')
+    root_universe.add_cell(root_cell)
+
+    geometry = openmc.Geometry(root_universe)
+    geometry.export_to_xml()
+
+    # Define Source
+    point = openmc.stats.Point((0, 0, 0))
+    source = openmc.source.Source(space=point)
+
+    # Define Settings
+    settings = openmc.Settings()
+    settings.source = source
+    settings.batches = 150
+    settings.inactive = 50
+    settings.particles = 5000
+    settings.export_to_xml()
+
+    # Define Tallies
+    tallies = openmc.Tallies()
+    mesh = openmc.RegularMesh(mesh_id=1)
+    mesh.dimension = [mesh_nr, mesh_nr]
+    mesh.lower_left = [-pitch * mesh_nr / 2, -pitch * mesh_nr / 2]
+    mesh.width = [pitch, pitch]
+
+    mesh_filter = openmc.MeshFilter(mesh)
+
+    tally = openmc.Tally(name='mesh tally')
+    tally.filters = [mesh_filter]
+    tally.scores = ['fission']
+
+    tallies.append(tally)
+    tallies.export_to_xml()
+
+    # Define Plots
+    plot1 = openmc.Plot()
+    plot1.filename = 'pinplot'
+    plot1.origin = (0, 0, 0)
+    plot1.width = (pitch * mesh_nr, pitch * mesh_nr)
+    plot1.pixels = (plot_pixels, plot_pixels)
+    plot1.color_by = 'material'
+    plot1.colors = {
+        components_outer.f_1: 'red',
+        components_outer.f_2: 'orange',
+        components_outer.f_3: 'yellow',
+        components_outer.f_4: 'green',
+        components_outer.UB2_diluted: 'maroon',
+        components_outer.water: 'blue',
+        components_outer.f_cutback: 'gray'
+    }
+
+    plot2 = openmc.Plot()
+    plot2.filename = 'XY_basis'
+    plot2.basis = 'xy'
+    plot2.origin = (0, 0, 0)
+    plot2.width = (pitch * mesh_nr, pitch * mesh_nr)
+    plot2.pixels = (plot_pixels, plot_pixels)
+    plot2.color_by = 'material'
+    plot2.colors = {
+        components_outer.f_1: 'red',
+        components_outer.f_2: 'orange',
+        components_outer.f_3: 'yellow',
+        components_outer.f_4: 'green',
+        components_outer.UB2_diluted: 'maroon',
+        components_outer.water: 'blue',
+        components_outer.f_cutback: 'gray'
+    }
+
+    plot3 = openmc.Plot()
+    plot3.filename = 'YZ_basis'
+    plot3.basis = 'yz'
+    plot3.width = (pitch * mesh_nr, 426)
+    plot3.pixels = (plot_pixels, plot_pixels)
+    plot3.color_by = 'cell'
+    plot3.colors = {
+        components_outer.f_1: 'red',
+        components_outer.f_2: 'orange',
+        components_outer.f_3: 'yellow',
+        components_outer.f_4: 'green',
+        components_outer.UB2_diluted: 'maroon',
+        components_outer.water: 'blue',
+        components_outer.f_cutback: 'gray'
+    }
+
+    plots = openmc.Plots([plot1, plot2, plot3])
+    plots.export_to_xml()
+
+    # Define Model and Depletion Operator
+    model = openmc.Model(geometry=geometry, settings=settings)
+    model.export_to_xml()
+
+    operator = openmc.deplete.CoupledOperator(model, DEPLETION_FILE)
+    power = 21.75E06 / 4  # Adjust as needed
+    time_steps = [109.5] * time_step_nr  # Define time steps
+    integrator = openmc.deplete.CECMIntegrator(operator, time_steps, power, timestep_units='d')
+    integrator.integrate()
+
+def save_enrichments():
+    """Save enrichment values to a file."""
+    try:
+        gen_pop = os.path.split(os.path.abspath(os.curdir))[-1].split("_")
+        gen = gen_pop[0]
+        pop = gen_pop[1]
+    except IndexError:
+        gen = "unknown"
+        pop = "unknown"
+
+    with open(os.path.join(ROOT_DIR, ENRICHMENT_VALUES), 'a') as file:
+        line = f"{gen} {pop} {enrichment1} {enrichment2} {enrichment3} {enrichment4} {t_urbo}\n"
+        file.write(line)
+
+# Save enrichments before running calculation
+save_enrichments()
+
+# Run the calculation
+run_calculation(enrichment1, enrichment2, enrichment3, enrichment4, thickness_urbo=t_urbo)

@@ -1,0 +1,122 @@
+{
+    "control_variables": {
+        "r1": {
+            "min": 6.0,
+            "max": 18.0
+        },
+        "r2": {
+            "min": 2.0,
+            "max": 12.0
+        },
+        "r3": {
+            "min": 2.0,
+            "max": 8.5
+        },
+        "r4": {
+            "min": 2.0,
+            "max": 7.5
+        },
+        "fr1": {
+            "min": 0.1,
+            "max": 0.13
+        },
+        "boron_mass_fraction_zone1": {
+            "min": 0.0001,  
+            "max": 0.03
+        }
+    },
+    "evaluators": {
+        "openmc_evaluator": {
+            "order": 0,
+            "input_script": [
+                "python",
+                "openmc_calculation.py"
+            ],
+            "inputs": [
+                "r1",
+                "r2",
+                "r3",
+                "r4",
+                "fr1",
+                "boron_mass_fraction_zone1"
+            ],
+            "output_script": [
+                "python",
+                "parse_openmc_output_overallppf.py"
+            ],
+            "outputs": [
+                "bol_keff",
+                "eol_keff",
+                "overall_ppf",
+                "deltaK"
+            ]
+        }
+    },
+    "constraints": {
+        "bol_keff": {
+            "operator": [
+                ">=",
+                "<"
+            ],
+            "constrained_val": [
+                1.11,
+                1.4
+            ]
+        },
+        "deltaK": {
+            "operator": [
+                ">=",
+                "<"
+            ],
+            "constrained_val": [
+                0.001,
+                0.1 
+            ]
+        },
+        "overall_ppf": {
+            "operator": [
+                ">=",
+                "<"
+            ],
+            "constrained_val": [
+                1.01,
+                1.50
+            ]
+        }
+    },
+    "algorithm": {
+        "objective": [
+            "max",
+            "min",
+            "min"
+        ],
+        "weight": [
+            1.0,
+            2.0,
+            1.0
+        ],
+        "optimized_variable": [
+            "bol_keff",
+            "deltaK",
+            "overall_ppf"
+        ],
+        "pop_size": 64,
+        "generations": 30,
+        "parallel": "multiprocessing",
+        "selection_operator": {
+            "operator": "selNSGA2"
+        },
+        "mating_operator": {
+            "operator": "cxBlend",
+            "alpha": 0.5
+        },
+        "mutation_operator": {
+            "operator": "mutPolynomialBounded",
+            "eta": 0.5,
+            "indpb": 0.4
+        },
+        "mutation_probability": 0.53,
+        "mating_probability": 0.47,
+        "keep_files": "only_final"
+    }
+}
