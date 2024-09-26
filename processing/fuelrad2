@@ -1,0 +1,191 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+BEST_N = 50
+BOLKEFF_UPPER_LIMIT = 1.336
+def select_best_n_pops_ranked(enrichments: pd.DataFrame, keff_ppf: pd.DataFrame,
+                       radiis: pd.DataFrame):
+    radiis = radiis.sort_values(['gen', 'pop', "t_urbo"])
+    changing_radius = radiis.iloc[::1]
+
+    acceptable_bolkeff_data = keff_ppf[keff_ppf["bol_keff"]<BOLKEFF_UPPER_LIMIT][['gen', 'pop']]
+
+    keff_ppf = keff_ppf.merge(acceptable_bolkeff_data, on=['gen', 'pop']).sort_values(['gen', 'pop'])
+
+
+    highest_keffs = keff_ppf.groupby('gen', group_keys=False).apply(lambda x: x.nsmallest(BEST_N, 'overall_ppf'))
+    highest_keffs_lowest_ppfs = highest_keffs.groupby('gen', group_keys=False).apply(
+        lambda x: x.nlargest(BEST_N, 'eol_keff')).sort_values(['gen', 'pop'])
+    best_gen_pop_indices = highest_keffs_lowest_ppfs[['gen', 'pop']]
+
+    best_radii = changing_radius#.merge(best_gen_pop_indices, on=['gen', 'pop']).sort_values(['gen', 'pop'])
+    best_enrichments = enrichments.merge(best_gen_pop_indices, on=['gen', 'pop']).sort_values(['gen', 'pop'])
+    return highest_keffs_lowest_ppfs, best_radii, best_enrichments
+
+
+def aggregated_statistics(data, columns_to_aggregate):
+    aggregation_functions = {col: ['mean', 'std'] for col in columns_to_aggregate}
+    grouped = data.groupby('gen').aggregate(aggregation_functions).reset_index()
+    grouped.columns = ['gen'] + [f'{col}_{stat}' for col in columns_to_aggregate for stat in ['mean', 'std']]
+    return grouped
+
+def aggregated_gen_statistics(data, columns_to_aggregate, popsize=48):
+    aggregation_functions = {col: ['mean', 'std'] for col in columns_to_aggregate}
+    data['gen'] = (data.index // popsize)
+    grouped = data.groupby('gen').aggregate(aggregation_functions).reset_index()
+    grouped.columns = ['gen'] + [f'{col}_{stat}' for col in columns_to_aggregate for stat in ['mean', 'std']]
+    return grouped
+
+def plot_with_errorbar(data, x_col, y_col, y_std, label, title, xlabel, ylabel):
+    plt.errorbar(data[x_col], data[y_col], yerr=data[y_std]/np.sqrt(BEST_N), fmt='-', capsize=5,
+                # color='b', ecolor='g',
+                alpha=0.3, elinewidth=2, label=label if label else y_col)
+    plt.xlabel(xlabel if xlabel else x_col)
+    plt.ylabel(ylabel if ylabel else y_col)
+    plt.title(title if title else f'Line Plot of {x_col} vs {y_col}')
+
+
+# Function to read fixed structure files
+def read_fixed_structure_file(file_path, column_names):
+    df = pd.read_csv(file_path, sep=" ", header=None)
+    df.columns = column_names
+    return df
+
+# Function for dual-axis plotting
+def plot_dual_axis(df, x_col, y_col1, y_col2, xlabel=None, ylabel1=None, ylabel2=None, title=None, label1=None, label2=None):
+    fig, ax1 = plt.subplots()
+    ax1.errorbar(df[x_col], df[f"{y_col1}_mean"], yerr=df[f"{y_col1}_std"]/np.sqrt(BEST_N), fmt='-', capsize=5,
+                color='b', ecolor='cornflowerblue',
+                alpha=0.7, elinewidth=1, label=label1 if label1 else y_col1)
+    ax1.set_xlabel(xlabel if xlabel else x_col)
+    ax1.set_ylabel(ylabel1 if ylabel1 else y_col1, color="blue")
+    ax1.tick_params(axis='y', labelcolor="blue")
+    ax2 = ax1.twinx()
+    ax2.errorbar(df[x_col], df[f"{y_col2}_mean"], yerr=df[f"{y_col2}_std"]/np.sqrt(BEST_N), fmt='-', capsize=5,
+                color='g', ecolor='springgreen',
+                alpha=0.7, elinewidth=1, label=label2 if label2 else y_col2)
+
+    ax2.set_ylabel(ylabel2 if ylabel2 else y_col2, color="green")
+    ax2.tick_params(axis='y', labelcolor="green")
+    plt.title(title if title else f'{y_col1} and {y_col2} vs {x_col}')
+    fig.tight_layout()
+    plt.savefig("t_urbo_vs_atom_fraction_U_dual_axis.png", dpi=300, bbox_inches='tight')
+
+# Function to read the radius file
+def read_radius_file(file_path):
+    before_change, after_change = None, None
+    try:
+        before_change = pd.read_csv(
+            file_path, delim_whitespace=True, header=None, nrows=846, 
+            names=['gen', 'pop', 'fuel_r1', 'fuel_r2', 'fuel_r3', 'fuel_r4', 'fuel_r5', 't_urbo']
+        )
+    except pd.errors.ParserError as e:
+        print(f"Error reading lines before the change in structure: {e}")
+
+    try:
+        after_change = pd.read_csv(
+            file_path, delim_whitespace=True, header=None, skiprows=847, 
+            names=['gen', 'pop', 'fuel_r1', 'fuel_r2', 'fuel_r3', 'fuel_r4', 'fuel_r5', 't_urbo', 'atom_fraction_U']
+        )
+    except pd.errors.ParserError as e:
+        print(f"Error reading lines after the change in structure: {e}")
+
+    if before_change is not None and after_change is not None:
+        df_combined = pd.concat([before_change, after_change], ignore_index=True)
+    elif before_change is not None:
+        df_combined = before_change
+    elif after_change is not None:
+        df_combined = after_change
+    else:
+        print("Failed to read any data.")
+        return None
+
+    df_combined = df_combined[df_combined['t_urbo'] != 1e-6].copy()
+    df_combined.loc[:, 't_urbo'] *= 1000  # Convert to microns
+
+    return df_combined
+
+# Example usage for UB2 Radius vs U fraction
+file_path = "fuel_radius.txt"
+radius = read_radius_file(file_path)
+radiuscn = ['gen', 'pop', 'fuel_r1', 'fuel_r2', 'fuel_r3', 'fuel_r4', 'fuel_r5', 't_urbo', 'atom_fraction_U']
+radius = read_fixed_structure_file(file_path, radiuscn)
+
+
+# Plot functions for EOL keff and EOL PPF, and fuel enrichment plots here
+# Function to plot EOL keff
+def plot_eol_keff(df):
+    plt.figure()
+    plt.errorbar(df['gen'], df['eol_keff_mean'], yerr=df[f"eol_keff_std"]/np.sqrt(BEST_N),
+                 fmt="-", alpha=0.7, label='EOL keff', elinewidth=1, ecolor='y', capsize=4)
+    plt.xlabel('Generation')
+    plt.ylabel('End of Life Keff')
+    plt.title('End of Life Keff over Generations')
+    plt.legend()
+    plt.savefig("eol_keff.png", dpi=300, bbox_inches='tight')
+
+# Function to plot EOL PPF
+def plot_ppf(df):
+    plt.figure()
+    plt.errorbar(df['gen'], df['eol_ppf_mean'], yerr=df[f"eol_ppf_std"]/np.sqrt(BEST_N),
+                 fmt="-", alpha=0.7, label='EOL PPF', elinewidth=1, ecolor='cornflowerblue', capsize=4)
+    plt.errorbar(df['gen'], df['overall_ppf_mean'], yerr=df[f"overall_ppf_std"]/np.sqrt(BEST_N),
+                 fmt="-", alpha=0.7, label='Overall PPF', elinewidth=1, ecolor='moccasin', capsize=4)
+    plt.xlabel('Generation')
+    plt.ylabel('PPF')
+    plt.title('End of Life and Overall PPF over Generations')
+    plt.legend()
+    plt.savefig("eol_overall_ppf.png", dpi=300, bbox_inches='tight')
+
+# Function to plot Fuel Enrichments
+def plot_enrichments(enrichment, start_index, end_index, filename, labels):
+    plt.figure()
+    for idx, r_index in enumerate(range(start_index, end_index + 1)):
+        plot_with_errorbar(enrichment, "gen", f"r{r_index}_mean",
+                           f"r{r_index}_std", xlabel='Generation',
+                  ylabel='Enrichment Values [%]', title='Fuel Enrichment Values Over Generations',
+                  label=labels[idx])
+    plt.legend()
+    plt.xticks(range(0, int(enrichment['gen'].max()) + 1, 15))
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+
+
+# Read the keff and PPF data
+keffppf_file_path = "keff_ppf.txt"
+# keffppf_column_names = ['gen', 'pop', 'bol_keff', 'eol_keff', 'overall_ppf_index', 'overall_ppf', 'eol_ppf']
+keffppf_column_names = ['gen_pop', 'bol_keff', 'eol_keff', 'overall_ppf_index', 'overall_ppf', 'eol_ppf']
+keffppf = read_fixed_structure_file(keffppf_file_path, keffppf_column_names)
+keffppf[['gen', 'pop']] = keffppf['gen_pop'].str.split('_', expand=True)
+keffppf['gen'] = keffppf['gen'].astype(int)
+keffppf['pop'] = keffppf['pop'].astype(int)
+
+
+# Read the enrichment data
+enrichment_file_path = "enrichments.txt"
+enrichment_column_names = ['gen', 'pop'] + [f"r{i}" for i in range(1, 6)]
+enrichment = read_fixed_structure_file(enrichment_file_path, enrichment_column_names)
+
+highest_keffs_lowest_ppfs, best_radii, best_enrichments = select_best_n_pops_ranked(enrichment, keffppf, radius)
+highest_keffs_lowest_ppfs = aggregated_statistics(highest_keffs_lowest_ppfs, ["eol_keff", "overall_ppf", 'eol_ppf'])
+# best_radii = aggregated_statistics(best_radii, list(best_radii.columns))
+best_radii = aggregated_gen_statistics(best_radii, list(best_radii.columns)[2:])
+best_enrichments = aggregated_statistics(best_enrichments, list(best_enrichments.columns))
+
+plot_eol_keff(highest_keffs_lowest_ppfs)
+plot_ppf(highest_keffs_lowest_ppfs)
+
+
+plot_dual_axis(best_radii, 'gen', 't_urbo', 'atom_fraction_U', xlabel='Generation',
+               ylabel1='UB2 Radius (µm)', ylabel2='Atom Fraction U:B', title='UB2 Layer Radius vs U atom fraction in UB2',
+               label1='UB2 Radius (µm)', label2='Fraction of U in UB2')
+
+# Plot fuel zones 1 to 4
+plot_enrichments(best_enrichments, 1, 4, "enrichments_zones_1_4.png",
+                 labels=["Innermost Pellet Zone", "Pellet Zone 2", "Pellet Zone 3", "Outermost Pellet Zone"])
+
+# # Plot fuel zones 5 to 8
+# plot_enrichments(best_enrichments, 5, 8, "enrichments_zones_5_8.png",
+#                  labels=["Lower Innermost Pellet Zone", "Lower Pellet Zone 2", "Lower Pellet Zone 3", "Lower Outermost Pellet Zone"])
